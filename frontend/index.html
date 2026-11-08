@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Keycloak Notes Demo</title>
+    <link rel="stylesheet" href="/style.css">
+    <script type="module" src="/app.js"></script>
+</head>
+<body>
+<header class="topbar">
+    <div class="brand">🔐 Notes Demo <span class="muted">user-service · Keycloak SPI · nginx auth_request</span></div>
+    <div class="session">
+        <span id="user-chip" class="chip" hidden></span>
+        <button id="btn-logout-all" hidden title="End every session of this account">Sign out everywhere</button>
+        <button id="btn-logout" hidden>Sign out</button>
+    </div>
+</header>
+
+<main>
+    <p id="status" class="banner" hidden></p>
+
+    <!-- Signed out --------------------------------------------------------->
+    <section id="view-anon" class="auth" hidden>
+        <article class="card auth-card">
+            <div class="tabs" role="tablist">
+                <button class="tab active" data-tab="login" role="tab">Sign in</button>
+                <button class="tab" data-tab="register" role="tab">Create account</button>
+            </div>
+
+            <form id="login-form" class="stack" data-panel="login" novalidate>
+                <label>Username or email <input name="username" autocomplete="username" required></label>
+                <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+                <p class="form-error" hidden></p>
+                <button class="primary" type="submit">Sign in</button>
+                <p class="muted small">Demo users: <code>alice / alice</code> (user) · <code>bob / bob</code> (user + admin)</p>
+            </form>
+
+            <form id="register-form" class="stack" data-panel="register" hidden novalidate>
+                <label>Username <input name="username" autocomplete="username" required></label>
+                <label>Email <input name="email" type="email" autocomplete="email" required></label>
+                <div class="row">
+                    <label class="grow">First name <input name="firstName" autocomplete="given-name" required></label>
+                    <label class="grow">Last name <input name="lastName" autocomplete="family-name" required></label>
+                </div>
+                <label>Password <input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+                <label>Repeat password <input name="password2" type="password" autocomplete="new-password" required></label>
+                <p class="form-error" hidden></p>
+                <button class="primary" type="submit">Create account</button>
+            </form>
+        </article>
+
+        <article class="card explain">
+            <h2>How sign-in works here</h2>
+            <ol class="small">
+                <li>The form posts to <code>/users/login</code> (user-service).</li>
+                <li>user-service asks Keycloak for tokens (password grant, confidential client).</li>
+                <li>Keycloak looks the user up and checks the password <em>by calling back into user-service</em> through the
+                    User Storage SPI. Users live in user-service's PostgreSQL.</li>
+                <li>The access token comes back to this page (kept in memory only). The refresh token is an
+                    <code>HttpOnly</code> cookie that JavaScript can't read.</li>
+                <li>API calls send the access token; nginx verifies it via <code>auth_request</code>.</li>
+            </ol>
+        </article>
+    </section>
+
+    <!-- Signed in ---------------------------------------------------------->
+    <section id="view-app" class="grid" hidden>
+        <article class="card">
+            <h2>My notes</h2>
+            <form id="note-form" class="row">
+                <input id="note-text" maxlength="500" placeholder="Write a note…" autocomplete="off" required>
+                <button class="primary" type="submit">Add</button>
+            </form>
+            <ul id="notes" class="list"></ul>
+            <p id="notes-empty" class="muted" hidden>No notes yet.</p>
+        </article>
+
+        <article class="card">
+            <h2>My profile <span class="muted small">GET/PUT /users/me</span></h2>
+            <form id="profile-form" class="stack" novalidate>
+                <p class="small muted">Username: <strong id="profile-username"></strong> · roles: <span id="profile-roles"></span></p>
+                <label>Email <input name="email" type="email" required></label>
+                <div class="row">
+                    <label class="grow">First name <input name="firstName" required></label>
+                    <label class="grow">Last name <input name="lastName" required></label>
+                </div>
+                <p class="form-error" hidden></p>
+                <p class="form-ok" hidden></p>
+                <button type="submit">Save profile</button>
+            </form>
+            <details>
+                <summary>Change password</summary>
+                <form id="password-form" class="stack" novalidate>
+                    <label>Current password <input name="currentPassword" type="password" autocomplete="current-password" required></label>
+                    <label>New password <input name="newPassword" type="password" autocomplete="new-password" minlength="8" required></label>
+                    <p class="muted small">Changing the password signs out all sessions, including this one.</p>
+                    <p class="form-error" hidden></p>
+                    <button type="submit">Change password</button>
+                </form>
+            </details>
+        </article>
+
+        <article class="card">
+            <h2>Who the notes backend thinks I am <span class="muted small">GET /api/me</span></h2>
+            <dl id="me" class="kv"></dl>
+            <p class="muted small">Built from the <code>X-User-*</code> headers nginx sets after the auth service verified the
+                JWT. Note the federated id <code>f:&lt;component&gt;:&lt;uuid&gt;</code>.</p>
+        </article>
+
+        <article class="card">
+            <h2>Access token</h2>
+            <p class="small">Expires in <strong id="token-exp">–</strong>
+                <button id="btn-refresh" class="small-btn">Refresh now</button></p>
+            <pre id="token-claims" class="code"></pre>
+        </article>
+
+        <article id="admin-users-card" class="card wide">
+            <h2>User administration <span class="badge">role: admin</span></h2>
+            <p id="admin-users-hint" class="muted small">Protected by <code>auth_request /_auth/admin</code>.
+                Changes end the user's sessions, so they take effect immediately.</p>
+            <form id="user-search" class="row">
+                <input name="q" placeholder="Search username, email, name…" autocomplete="off">
+                <button type="submit">Search</button>
+            </form>
+            <p class="form-error" id="admin-users-error" hidden></p>
+            <table id="users-table" hidden>
+                <thead><tr><th>User</th><th>Email</th><th>Admin</th><th>Enabled</th><th></th></tr></thead>
+                <tbody></tbody>
+            </table>
+            <p id="users-total" class="muted small"></p>
+        </article>
+
+        <article class="card">
+            <h2>All notes <span class="badge">role: admin</span></h2>
+            <p class="muted small">Notes backend, protected by <code>auth_request /_auth/admin</code>.</p>
+            <button id="btn-admin">Load all users' notes</button>
+            <div id="admin-result"></div>
+        </article>
+
+        <article class="card">
+            <h2>Gateway playground</h2>
+            <div class="row wrap">
+                <button data-probe="/api/me" data-auth="yes">/api/me (token)</button>
+                <button data-probe="/api/me" data-auth="no">/api/me (no token)</button>
+                <button data-probe="/api/me" data-auth="bad">/api/me (tampered)</button>
+                <button data-probe="/users/admin/users" data-auth="yes">/users/admin/users</button>
+                <button data-probe="/internal/users/search" data-auth="no">/internal/… (SPI only)</button>
+                <button data-probe="/public/info" data-auth="no">/public/info</button>
+            </div>
+            <h3>Request log</h3>
+            <ol id="log" class="log" reversed></ol>
+        </article>
+    </section>
+</main>
+</body>
+</html>

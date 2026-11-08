@@ -1,0 +1,37 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: auth-service
+  threads:
+    virtual:
+      enabled: true
+
+auth:
+  jwt:
+    # Expected "iss" claim: the public realm URL as clients see it.
+    issuer: ${AUTH_ISSUER_URI:http://localhost:8080/auth/realms/demo}
+    audiences: ${AUTH_AUDIENCE:demo-api}
+    # Realm RS256 public key, used to verify token signatures. Copy it from
+    # Admin console -> Realm settings -> Keys -> RS256 -> "Public key"
+    # (bare base64 or PEM both work).
+    public-key: ${AUTH_PUBLIC_KEY:}
+    # Used only when public-key is empty: the key is read once at startup from
+    # this endpoint's "public_key" field.
+    realm-uri: ${AUTH_REALM_URI:http://localhost:8080/auth/realms/demo}
+    clock-skew: 30s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  level:
+    org.springframework.security: INFO

@@ -1,0 +1,5 @@
+auth-service/target/
+backend/target/
+user-service/target/
+keycloak-spi/target/
+.env

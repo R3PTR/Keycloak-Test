@@ -1,0 +1,141 @@
+name: keycloak-gateway
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:-keycloak}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  users-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: users
+      POSTGRES_USER: users
+      POSTGRES_PASSWORD: ${USERS_DB_PASSWORD:-users}
+    volumes:
+      - users-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U users -d users"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    # Stock Keycloak + the user-service User Storage provider (keycloak-spi/).
+    build: ./keycloak-spi
+    command: ["start", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:-keycloak}
+      # Keycloak runs behind nginx under /auth. The public URL determines the
+      # "iss" claim in every token, so it must match what the auth service expects.
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: ${PUBLIC_URL:-http://localhost:8080}/auth
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      # Substituted into realm-demo.json on import (${...} placeholders).
+      USER_SERVICE_CLIENT_SECRET: ${USER_SERVICE_CLIENT_SECRET:-dev-user-service-secret}
+      USER_SERVICE_INTERNAL_TOKEN: ${USER_SERVICE_INTERNAL_TOKEN:-dev-internal-token}
+    volumes:
+      - ./keycloak/realm-demo.json:/opt/keycloak/data/import/realm-demo.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The image has no curl; talk HTTP to the management port via bash.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  auth-service:
+    build: ./auth-service
+    environment:
+      # Expected "iss" claim (public URL) ...
+      AUTH_ISSUER_URI: ${PUBLIC_URL:-http://localhost:8080}/auth/realms/demo
+      # Realm RS256 public key used to verify signatures. Paste it from
+      # Admin console -> Realm settings -> Keys -> RS256 -> "Public key" to pin it.
+      AUTH_PUBLIC_KEY: ${AUTH_PUBLIC_KEY:-}
+      # If AUTH_PUBLIC_KEY is empty, read "public_key" from the realm endpoint
+      # once at startup (internal Docker network).
+      AUTH_REALM_URI: http://keycloak:8080/auth/realms/demo
+      AUTH_AUDIENCE: demo-api
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  user-service:
+    # Users, passwords (BCrypt) and roles in PostgreSQL; login/logout API.
+    # Keycloak federates these users through the SPI (calls /internal/users).
+    build: ./user-service
+    environment:
+      USERS_DB_URL: jdbc:postgresql://users-db:5432/users
+      USERS_DB_USER: users
+      USERS_DB_PASSWORD: ${USERS_DB_PASSWORD:-users}
+      USER_SERVICE_INTERNAL_TOKEN: ${USER_SERVICE_INTERNAL_TOKEN:-dev-internal-token}
+      USER_SERVICE_CLIENT_SECRET: ${USER_SERVICE_CLIENT_SECRET:-dev-user-service-secret}
+      KEYCLOAK_URL: http://keycloak:8080/auth
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    depends_on:
+      users-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8082/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  backend:
+    # Demo notes API. No published port: reachable only via nginx, which is
+    # what makes trusting the X-User-* headers safe.
+    build: ./backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  nginx:
+    image: nginx:1.29-alpine
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      # Mount the directory, not the file: editors replace the file (new inode),
+      # which a single-file bind mount would not pick up.
+      - ./nginx:/etc/nginx/custom:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    command: ["nginx", "-c", "/etc/nginx/custom/nginx.conf", "-g", "daemon off;"]
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  users-data:
